@@ -1,0 +1,28 @@
+name: Test and Validate
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/**'
+      - 'actions/**'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/**'
+      - 'actions/**'
+      - 'README.md'
+      - 'CONTRIBUTING.md'
+
+jobs:
+  lint-actions:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run actionlint
+        run: |
+          docker run --rm -v "$PWD:/repo" -w /repo rhysd/actionlint:latest -color

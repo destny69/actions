@@ -1,0 +1,58 @@
+name: Pipeline Prechecks
+description: Runs dependency auditing, SAST, and secret scanning before application build steps.
+
+inputs:
+  fail-on-audit-warnings:
+    description: Fails the action if audit warnings are detected.
+    required: false
+    default: 'true'
+  working-directory:
+    description: Directory containing the project's package manifest.
+    required: false
+    default: '.'
+
+runs:
+  using: composite
+  steps:
+    - name: Audit dependencies
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        FAIL_ON_AUDIT_WARNINGS: ${{ inputs.fail-on-audit-warnings }}
+      run: |
+        set -euo pipefail
+
+        echo "Running dependency audit in $PWD"
+        if [[ -f package.json ]]; then
+          if [[ -f yarn.lock ]]; then
+            echo "Detected Yarn lockfile. Running yarn audit."
+            yarn audit --level high
+          elif [[ -f package-lock.json || -f npm-shrinkwrap.json ]]; then
+            echo "Detected npm lockfile. Running npm audit."
+            if [[ "${FAIL_ON_AUDIT_WARNINGS}" == "true" ]]; then
+              npm audit --audit-level=high
+            else
+              npm audit --audit-level=moderate
+            fi
+          else
+            echo "No lockfile detected. Running npm audit with the default threshold."
+            if [[ "${FAIL_ON_AUDIT_WARNINGS}" == "true" ]]; then
+              npm audit --audit-level=high
+            else
+              npm audit --audit-level=moderate
+            fi
+          fi
+        else
+          echo "No package.json detected. Skipping dependency audit."
+        fi
+
+    - name: Run Semgrep SAST
+      uses: returntocorp/semgrep-action@v1
+      with:
+        config: p/default
+        generateSarif: true
+
+    - name: Scan for secrets
+      uses: gitleaks/gitleaks-action@v2
+      env:
+        GITHUB_TOKEN: ${{ github.token }}

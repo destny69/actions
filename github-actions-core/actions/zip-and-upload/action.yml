@@ -1,0 +1,72 @@
+name: Zip and Upload Artifact
+description: Validates a build directory, archives it, and publishes the ZIP to GitHub Packages.
+
+inputs:
+  build-folder:
+    description: Path to the build or distribution folder to archive.
+    required: true
+  package-name:
+    description: Package identifier used for the upload path.
+    required: true
+  github-token:
+    description: GitHub token with packages:write permissions.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Validate build folder
+      shell: bash
+      run: |
+        set -euo pipefail
+        build_folder="${{ inputs.build-folder }}"
+        if [[ ! -d "$build_folder" ]]; then
+          echo "::error::Build folder '$build_folder' does not exist."
+          exit 1
+        fi
+        echo "Validated build folder: $build_folder"
+
+    - name: Create ZIP package
+      shell: bash
+      env:
+        BUILD_FOLDER: ${{ inputs.build-folder }}
+        PACKAGE_NAME: ${{ inputs.package-name }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+        GITHUB_SHA: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+        artifact_tag="${GITHUB_REF_NAME:-${GITHUB_SHA::12}}"
+        archive_name="${PACKAGE_NAME}-${artifact_tag}.zip"
+        archive_path="${RUNNER_TEMP}/${archive_name}"
+
+        if [[ -f "$archive_path" ]]; then
+          rm -f "$archive_path"
+        fi
+
+        echo "Creating archive $archive_name from $BUILD_FOLDER"
+        (cd "$BUILD_FOLDER" && zip -r "$archive_path" .)
+
+    - name: Upload ZIP package to GitHub Packages
+      shell: bash
+      env:
+        PACKAGE_NAME: ${{ inputs.package-name }}
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+        GITHUB_REPOSITORY: ${{ github.event.repository.name }}
+        GITHUB_REF_NAME: ${{ github.ref_name }}
+        GITHUB_SHA: ${{ github.sha }}
+      run: |
+        set -euo pipefail
+        artifact_tag="${GITHUB_REF_NAME:-${GITHUB_SHA::12}}"
+        archive_name="${PACKAGE_NAME}-${artifact_tag}.zip"
+        archive_path="${RUNNER_TEMP}/${archive_name}"
+        repo_owner="${GITHUB_REPOSITORY_OWNER}"
+        repo_name="${GITHUB_REPOSITORY}"
+        upload_url="https://maven.pkg.github.com/${repo_owner}/${repo_name}/${PACKAGE_NAME}/${artifact_tag}/${archive_name}"
+
+        echo "Uploading $archive_path to $upload_url"
+        curl -fsSL -X PUT \
+          -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+          -H "Content-Type: application/zip" \
+          --upload-file "$archive_path" \
+          "$upload_url"
