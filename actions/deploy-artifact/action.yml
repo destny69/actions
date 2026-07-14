@@ -1,5 +1,5 @@
 name: Deploy Artifact
-description: Downloads a packaged artifact from GitHub Packages, creates a rollback snapshot, and deploys it to a target path.
+description: Downloads a packaged artifact from GitHub Packages, transfers it via SSH, creates a rollback snapshot, and deploys it safely using rsync.
 
 inputs:
   package-name:
@@ -9,15 +9,25 @@ inputs:
     description: Version or Git tag identifier for the artifact.
     required: true
   deploy-target-path:
-    description: Destination path for the extracted artifact.
+    description: Destination path for the extracted artifact on the remote server.
     required: true
   github-token:
     description: GitHub token with read access to the package.
     required: true
+  server-ip:
+    description: Public IP or hostname of the remote server.
+    required: true
   server-user:
-    description: Linux owner account for the deployed files.
+    description: Linux account used to SSH into the server and own the deployed files.
     required: false
     default: 'www-data'
+  server-ssh-key:
+    description: Private SSH key authorized to access the remote server.
+    required: true
+  server-ssh-port:
+    description: SSH port of the remote server.
+    required: false
+    default: '22'
 
 runs:
   using: composite
@@ -44,55 +54,106 @@ runs:
           exit 1
         fi
 
-    - name: Create rollback snapshot
+    - name: Configure SSH Key
       shell: bash
       env:
-        DEPLOY_TARGET_PATH: ${{ inputs.deploy-target-path }}
-        PACKAGE_NAME: ${{ inputs.package-name }}
-        VERSION_TAG: ${{ inputs.version-tag }}
+        SSH_PRIVATE_KEY: ${{ inputs.server-ssh-key }}
+        SERVER_IP: ${{ inputs.server-ip }}
+        SSH_PORT: ${{ inputs.server-ssh-port }}
       run: |
         set -euo pipefail
-        deploy_path="${DEPLOY_TARGET_PATH}"
-        backup_root="/rollback/${PACKAGE_NAME}-${VERSION_TAG}-$(date +%Y%m%d%H%M%S)"
-        mkdir -p "$backup_root"
+        mkdir -p ~/.ssh
+        chmod 700 ~/.ssh
+        
+        # Scan host keys to prevent interactive prompts
+        ssh-keyscan -p "$SSH_PORT" "$SERVER_IP" >> ~/.ssh/known_hosts 2>/dev/null
+        
+        # Initialize SSH agent
+        eval "$(ssh-agent -s)"
+        echo "$SSH_PRIVATE_KEY" | tr -d '\r' | ssh-add - >/dev/null
+        
+        # Export env variables to persist the agent across steps
+        echo "SSH_AUTH_SOCK=$SSH_AUTH_SOCK" >> $GITHUB_ENV
+        echo "SSH_AGENT_PID=$SSH_AGENT_PID" >> $GITHUB_ENV
 
-        if [[ -d "$deploy_path" ]]; then
-          cp -a "$deploy_path"/. "$backup_root"/
-        else
-          mkdir -p "$deploy_path"
-        fi
-
-        echo "backup_root=$backup_root" >> "$GITHUB_ENV"
-
-    - name: Extract artifact payload
+    - name: Transfer artifact to Remote Server
       shell: bash
       env:
-        DEPLOY_TARGET_PATH: ${{ inputs.deploy-target-path }}
         PACKAGE_NAME: ${{ inputs.package-name }}
         VERSION_TAG: ${{ inputs.version-tag }}
-      run: |
-        set -euo pipefail
-        deploy_path="${DEPLOY_TARGET_PATH}"
-        archive_path="${RUNNER_TEMP}/${PACKAGE_NAME}-${VERSION_TAG}.zip"
-
-        mkdir -p "$deploy_path"
-        find "$deploy_path" -mindepth 1 -maxdepth 1 -exec rm -rf {} +
-        unzip -o "$archive_path" -d "$deploy_path"
-
-    - name: Apply Linux permissions
-      shell: bash
-      env:
-        DEPLOY_TARGET_PATH: ${{ inputs.deploy-target-path }}
         SERVER_USER: ${{ inputs.server-user }}
+        SERVER_IP: ${{ inputs.server-ip }}
+        SSH_PORT: ${{ inputs.server-ssh-port }}
       run: |
         set -euo pipefail
-        deploy_path="${DEPLOY_TARGET_PATH}"
+        archive_name="${PACKAGE_NAME}-${VERSION_TAG}.zip"
+        local_archive_path="${RUNNER_TEMP}/${archive_name}"
+        
+        echo "Transferring $archive_name to remote server..."
+        scp -P "$SSH_PORT" "$local_archive_path" "${SERVER_USER}@${SERVER_IP}:/tmp/${archive_name}"
 
-        if [[ -d "$deploy_path" ]]; then
-          chown -R "${SERVER_USER}:${SERVER_USER}" "$deploy_path"
-          find "$deploy_path" -type d -exec chmod 0755 {} +
-          find "$deploy_path" -type f -exec chmod 0644 {} +
-        else
-          echo "::error::Deploy target path '$deploy_path' does not exist."
-          exit 1
-        fi
+    - name: Remote Operation - Create rollback snapshot
+      shell: bash
+      env:
+        DEPLOY_TARGET_PATH: ${{ inputs.deploy-target-path }}
+        PACKAGE_NAME: ${{ inputs.package-name }}
+        VERSION_TAG: ${{ inputs.version-tag }}
+        SERVER_USER: ${{ inputs.server-user }}
+        SERVER_IP: ${{ inputs.server-ip }}
+        SSH_PORT: ${{ inputs.server-ssh-port }}
+      run: |
+        set -euo pipefail
+        backup_root="/rollback/${PACKAGE_NAME}-${VERSION_TAG}-$(date +%Y%m%d%H%M%S)"
+        
+        echo "Creating remote rollback snapshot at $backup_root..."
+        ssh -p "$SSH_PORT" "${SERVER_USER}@${SERVER_IP}" "
+          set -euo pipefail
+          mkdir -p '$backup_root'
+          if [[ -d '${DEPLOY_TARGET_PATH}' ]]; then
+            cp -a '${DEPLOY_TARGET_PATH}'/. '$backup_root'/
+          else
+            mkdir -p '${DEPLOY_TARGET_PATH}'
+          fi
+        "
+
+    - name: Remote Operation - Extract payload and Sync changes (rsync)
+      shell: bash
+      env:
+        DEPLOY_TARGET_PATH: ${{ inputs.deploy-target-path }}
+        PACKAGE_NAME: ${{ inputs.package-name }}
+        VERSION_TAG: ${{ inputs.version-tag }}
+        SERVER_USER: ${{ inputs.server-user }}
+        SERVER_IP: ${{ inputs.server-ip }}
+        SSH_PORT: ${{ inputs.server-ssh-port }}
+      run: |
+        set -euo pipefail
+        archive_name="${PACKAGE_NAME}-${VERSION_TAG}.zip"
+        remote_archive_path="/tmp/${archive_name}"
+        temp_extract_path="/tmp/extracted_${PACKAGE_NAME}_${VERSION_TAG}"
+
+        echo "Extracting archive to temporary folder and syncing changes..."
+        ssh -p "$SSH_PORT" "${SERVER_USER}@${SERVER_IP}" "
+          set -euo pipefail
+          
+          # 1. Prepare fresh temporary folder
+          rm -rf '$temp_extract_path'
+          mkdir -p '$temp_extract_path'
+          
+          # 2. Extract zip package into temporary directory
+          unzip -q -o '$remote_archive_path' -d '$temp_extract_path'
+          
+          # 3. Ensure target production folder exists
+          mkdir -p '${DEPLOY_TARGET_PATH}'
+          
+          # 4. Sync files safely (leaving .env and untracked files completely untouched)
+          rsync -avz '$temp_extract_path/' '${DEPLOY_TARGET_PATH}/'
+          
+          # 5. Apply operational system permissions on target host
+          chown -R '${SERVER_USER}:${SERVER_USER}' '${DEPLOY_TARGET_PATH}'
+          find '${DEPLOY_TARGET_PATH}' -type d -exec chmod 0755 {} +
+          find '${DEPLOY_TARGET_PATH}' -type f -exec chmod 0644 {} +
+          
+          # 6. Housekeeping cleanup
+          rm -rf '$temp_extract_path'
+          rm -f '$remote_archive_path'
+        "
