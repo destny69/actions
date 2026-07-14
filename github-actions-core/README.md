@@ -5,6 +5,7 @@ github-actions-core is a centralized, reusable GitHub Actions library for enterp
 ## What this repository contains
 
 - actions/pipeline-prechecks: dependency auditing, SAST, and secret scanning before build execution.
+- actions/build-project: prepares a build output directory and can run a build command after prechecks.
 - actions/zip-and-upload: build-folder validation, archive packaging, and GitHub Packages publication.
 - actions/deploy-artifact: artifact retrieval, rollback preparation, extraction, and permission hardening.
 
@@ -18,6 +19,9 @@ github-actions-core/
 │       └── pr-lint.yml
 ├── actions/
 │   ├── pipeline-prechecks/
+│   │   ├── action.yml
+│   │   └── README.md
+│   ├── build-project/
 │   │   ├── action.yml
 │   │   └── README.md
 │   ├── zip-and-upload/
@@ -75,9 +79,11 @@ jobs:
           working-directory: .
 
       - name: Build application
-        run: |
-          npm ci
-          npm run build
+        uses: your-org/github-actions-core/actions/build-project@v1
+        with:
+          working-directory: .
+          build-folder: dist
+          build-command: npm run build
 
       - name: Package and publish
         uses: your-org/github-actions-core/actions/zip-and-upload@v1

@@ -1,0 +1,77 @@
+name: Build Project
+description: Creates a build output directory for an application after prechecks and optionally runs a build command.
+
+inputs:
+  working-directory:
+    description: Directory containing the project's source and package manifest.
+    required: false
+    default: '.'
+  build-folder:
+    description: Path to the build output directory to create.
+    required: false
+    default: 'build'
+  build-command:
+    description: Optional custom command to run to generate the build output.
+    required: false
+    default: ''
+  package-manager:
+    description: Optional package manager override for automatic build detection.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Create build output folder
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        BUILD_FOLDER: ${{ inputs.build-folder }}
+        BUILD_COMMAND: ${{ inputs.build-command }}
+        PACKAGE_MANAGER: ${{ inputs.package-manager }}
+      run: |
+        set -euo pipefail
+
+        build_folder="${BUILD_FOLDER}"
+        build_command="${BUILD_COMMAND}"
+        package_manager="${PACKAGE_MANAGER}"
+
+        mkdir -p "$build_folder"
+
+        if [[ -n "$build_command" ]]; then
+          echo "Running custom build command: $build_command"
+          eval "$build_command"
+        elif [[ -f package.json ]]; then
+          if [[ -n "$package_manager" ]]; then
+            case "$package_manager" in
+              npm)
+                npm run build
+                ;;
+              yarn)
+                yarn build
+                ;;
+              pnpm)
+                pnpm build
+                ;;
+              *)
+                echo "::error::Unsupported package manager '$package_manager'."
+                exit 1
+                ;;
+            esac
+          elif [[ -f pnpm-lock.yaml ]]; then
+            pnpm build
+          elif [[ -f yarn.lock ]]; then
+            yarn build
+          else
+            npm run build
+          fi
+        else
+          echo "No package.json detected. Creating the output folder only."
+        fi
+
+        if [[ -d "$build_folder" ]]; then
+          echo "Build folder ready at $build_folder"
+        else
+          echo "::error::Build folder '$build_folder' was not created."
+          exit 1
+        fi
