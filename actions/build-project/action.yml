@@ -1,5 +1,5 @@
 name: Build Project
-description: Creates a build output directory for an application after prechecks and optionally runs a build command.
+description: Creates a build output directory for an application after prechecks, installs dependencies, and optionally runs a build command.
 
 inputs:
   working-directory:
@@ -22,7 +22,7 @@ inputs:
 runs:
   using: composite
   steps:
-    - name: Create build output folder
+    - name: Install dependencies and build project
       shell: bash
       working-directory: ${{ inputs.working-directory }}
       env:
@@ -36,8 +36,52 @@ runs:
         build_command="${BUILD_COMMAND}"
         package_manager="${PACKAGE_MANAGER}"
 
+        # --- 1. DETECT & INSTALL DEPENDENCIES ---
+        if [[ -f package.json ]]; then
+          echo "Found package.json. Checking for lockfiles to install dependencies..."
+          
+          # If a package manager is explicitly forced
+          if [[ -n "$package_manager" ]]; then
+            case "$package_manager" in
+              npm)
+                echo "Installing dependencies using npm..."
+                npm ci
+                ;;
+              yarn)
+                echo "Installing dependencies using yarn..."
+                yarn install --frozen-lockfile
+                ;;
+              pnpm)
+                echo "Installing dependencies using pnpm..."
+                pnpm install --frozen-lockfile
+                ;;
+              *)
+                echo "::error::Unsupported package manager '$package_manager'."
+                exit 1
+                ;;
+            esac
+          # Otherwise, auto-detect by lockfile
+          elif [[ -f pnpm-lock.yaml ]]; then
+            echo "pnpm-lock.yaml detected. Installing with pnpm..."
+            pnpm install --frozen-lockfile
+          elif [[ -f yarn.lock ]]; then
+            echo "yarn.lock detected. Installing with yarn..."
+            yarn install --frozen-lockfile
+          elif [[ -f package-lock.json ]]; then
+            echo "package-lock.json detected. Installing with npm..."
+            npm ci
+          else
+            echo "No lockfile detected. Falling back to generic npm install..."
+            npm install
+          fi
+        else
+          echo "No package.json detected. Skipping dependency installation."
+        fi
+
+        # --- 2. PREPARE BUILD DIRECTORY ---
         mkdir -p "$build_folder"
 
+        # --- 3. RUN BUILD COMMAND ---
         if [[ -n "$build_command" ]]; then
           echo "Running custom build command: $build_command"
           eval "$build_command"
@@ -53,10 +97,6 @@ runs:
               pnpm)
                 pnpm build
                 ;;
-              *)
-                echo "::error::Unsupported package manager '$package_manager'."
-                exit 1
-                ;;
             esac
           elif [[ -f pnpm-lock.yaml ]]; then
             pnpm build
@@ -69,6 +109,7 @@ runs:
           echo "No package.json detected. Creating the output folder only."
         fi
 
+        # --- 4. VALIDATE BUILD ---
         if [[ -d "$build_folder" ]]; then
           echo "Build folder ready at $build_folder"
         else
