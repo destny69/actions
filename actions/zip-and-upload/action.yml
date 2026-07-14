@@ -53,7 +53,6 @@ runs:
         (cd "$BUILD_FOLDER" && zip -r "$archive_path" .)
 
     - name: Upload ZIP package to GitHub Packages
-      id: upload
       shell: bash
       env:
         PACKAGE_NAME: ${{ inputs.package-name }}
@@ -78,5 +77,4 @@ runs:
           --upload-file "$archive_path" \
           "$upload_url"
 
-        echo "PACKAGE_URL=${upload_url}" >> $GITHUB_ENV
-        echo "PACKAGE_URL=${upload_url}" >> $GITHUB_OUTPUT  
+
